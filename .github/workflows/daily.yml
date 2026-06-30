@@ -1,0 +1,46 @@
+name: Risposta Mail Automatica
+
+# Gira ogni mattina alle 7:00 ora italiana.
+# NOTA: il cron di GitHub Actions usa UTC.
+#   - Ora legale (estate, CEST = UTC+2): 7:00 IT = 5:00 UTC
+#   - Ora solare (inverno, CET = UTC+1): 7:00 IT = 6:00 UTC
+# Per semplicità qui impostiamo 5:00 UTC. Regola se necessario.
+on:
+  schedule:
+    - cron: "0 5 * * *"
+  workflow_dispatch:   # permette anche l'avvio manuale dal tab Actions
+
+jobs:
+  rispondi-mail:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout del repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Installa dipendenze
+        run: pip install -r requirements.txt
+
+      - name: Ricostruisci credentials.json e token.json dai secret
+        run: |
+          echo '${{ secrets.GMAIL_CREDENTIALS_JSON }}' > credentials.json
+          echo '${{ secrets.GMAIL_TOKEN_JSON }}' > token.json
+
+      - name: Esegui lo script
+        env:
+          AI_PROVIDER: ${{ vars.AI_PROVIDER }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GMAIL_LABEL: ${{ vars.GMAIL_LABEL }}
+          PROCESSED_LABEL: ${{ vars.PROCESSED_LABEL }}
+          DRY_RUN: ${{ vars.DRY_RUN }}
+        run: python auto_mail_responder.py
+
+      - name: Salva il token aggiornato (se rinnovato)
+        run: |
+          echo "Il token potrebbe essere stato rinnovato durante l'esecuzione."
+          echo "Se usi un refresh token a lunga durata, non serve fare nulla."
