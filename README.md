@@ -26,6 +26,12 @@ export AI_PROVIDER=claude          # oppure "gemini"
 export ANTHROPIC_API_KEY=sk-ant-...   # se usi Claude
 export GEMINI_API_KEY=...             # se usi Gemini
 export GMAIL_LABEL=DaRispondere       # nome dell'etichetta da monitorare
+
+# Facoltative (hanno un default sensato)
+export GEMINI_MODEL=gemini-2.5-flash  # modello Gemini (default: gemini-2.5-flash-lite)
+export CLAUDE_MODEL=claude-sonnet-4-6 # modello Claude
+export AI_MAX_RETRIES=3               # tentativi se il modello è occupato (503/429)
+export AI_RETRY_WAIT_SECONDS=300      # attesa fra i tentativi, in secondi (5 min)
 ```
 
 ### 4. Crea l'etichetta in Gmail
@@ -47,8 +53,17 @@ Per farlo girare ogni mattina senza accendere il PC:
 - **GitHub Actions** — workflow cron schedulato
 
 ## Modificare il regolamento
-Tutte le regole sono nella variabile `REGOLAMENTO` dentro `auto_mail_responder.py`.
-Aggiungi nuove regole con lo stesso formato della Regola 1.
+Le regole NON sono più nel codice: stanno nei file markdown, facili da modificare.
+- `regolamento.md` — le regole e le FAQ (il "cervello"). Aggiungi nuove regole con lo stesso formato della Regola 1.
+- `formato-risposta.md` — il formato JSON tecnico richiesto all'AI (di solito non serve toccarlo).
+
+Percorsi sovrascrivibili con le variabili `REGOLAMENTO_FILE` e `FORMATO_FILE`.
+Se un file manca, lo script si ferma con un messaggio d'errore chiaro.
+
+## Modello occupato / sovraccarico
+Se l'AI risponde con un errore di sovraccarico (es. `503 UNAVAILABLE`, `429`), lo script
+aspetta 5 minuti e riprova, fino a 3 tentativi. Regolabile con `AI_MAX_RETRIES` e
+`AI_RETRY_WAIT_SECONDS`.
 
 ## Sicurezza
 - `credentials.json` e `token.json` contengono accessi sensibili: NON caricarli su repo pubblici.

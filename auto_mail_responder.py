@@ -13,8 +13,10 @@ Configurazione tramite variabili d'ambiente - vedi sezione CONFIG.
 
 import os
 import json
+import time
 import base64
 import logging
+from pathlib import Path
 from email.mime.text import MIMEText
 
 from google.oauth2.credentials import Credentials
@@ -36,6 +38,16 @@ AI_REPLIED_LABEL = os.environ.get("AI_REPLIED_LABEL", "Risposta da AI")
 LEVEL2_REVIEW_LABEL = os.environ.get("LEVEL2_REVIEW_LABEL", "Da controllare a livello 2")
 DRY_RUN = os.environ.get("DRY_RUN", "false").lower() == "true"  # se true, non invia nulla
 
+# Retry quando il modello è occupato/sovraccarico (es. 503 UNAVAILABLE, 429 quota).
+AI_MAX_RETRIES = int(os.environ.get("AI_MAX_RETRIES", "3"))  # tentativi totali
+AI_RETRY_WAIT_SECONDS = int(os.environ.get("AI_RETRY_WAIT_SECONDS", "300"))  # attesa fra i tentativi (5 min)
+
+# File markdown con le regole (il "cervello") e il formato di risposta richiesto.
+# Modifica quei file per cambiare il comportamento dell'AI, senza toccare il codice.
+BASE_DIR = Path(__file__).resolve().parent
+REGOLAMENTO_FILE = os.environ.get("REGOLAMENTO_FILE", str(BASE_DIR / "regolamento.md"))
+FORMATO_FILE = os.environ.get("FORMATO_FILE", str(BASE_DIR / "formato-risposta.md"))
+
 SCOPES = [
     "https://www.googleapis.com/auth/gmail.modify",
     "https://www.googleapis.com/auth/gmail.compose",
@@ -49,51 +61,24 @@ logging.basicConfig(
 log = logging.getLogger("mail-responder")
 
 # ============================================================
-# REGOLAMENTO / FAQ
-# Questo è il "cervello" del sistema. Aggiungi qui le regole.
+# REGOLAMENTO / FAQ + FORMATO RISPOSTA
+# Il "cervello" del sistema vive nei file markdown (vedi CONFIG sopra):
+#   - regolamento.md      -> regole e FAQ, da modificare per cambiare le risposte
+#   - formato-risposta.md -> formato JSON richiesto all'AI
 # ============================================================
-REGOLAMENTO = """
-Sei l'assistente della Commissione Orario dell'IIS Galvani/Mi.
-Rispondi alle mail in italiano, in tono cortese e formale (dai del "tu" ai colleghi/studenti).
-Firma sempre come "La Commissione Orario".
+def load_system_instructions():
+    try:
+        regolamento = Path(REGOLAMENTO_FILE).read_text(encoding="utf-8").strip()
+    except OSError as e:
+        raise SystemExit(f"Impossibile leggere il regolamento '{REGOLAMENTO_FILE}': {e}")
+    try:
+        formato = Path(FORMATO_FILE).read_text(encoding="utf-8").strip()
+    except OSError as e:
+        raise SystemExit(f"Impossibile leggere il formato risposta '{FORMATO_FILE}': {e}")
+    return regolamento + "\n\n" + formato
 
-REGOLE:
 
-[Regola 1] Richiesta accesso con account Gmail personale
-- Trigger: qualcuno chiede accesso a un file/modulo dell'istituto usando un indirizzo @gmail.com (non istituzionale)
-- Confidenza: ALTA -> invio automatico
-- Risposta:
-  "Gentile [Nome], i moduli e i file dell'istituto sono accessibili esclusivamente
-  tramite account istituzionale. Ti chiediamo di effettuare l'accesso con il tuo account
-  @iisgalvanimi.edu.it e riprovare. Per qualsiasi problema con l'account istituzionale,
-  rivolgiti alla segreteria. Grazie per la collaborazione."
-
-[Regola generale]
-- Se la mail non rientra in nessuna regola conosciuta, oppure è ambigua, o richiede
-  una decisione discrezionale -> confidenza BASSA -> salva come bozza.
-- Non inventare informazioni non presenti nel regolamento.
-"""
-
-# ============================================================
-# OUTPUT RICHIESTO ALL'AI
-# ============================================================
-SYSTEM_INSTRUCTIONS = REGOLAMENTO + """
-
-Analizza la mail fornita e rispondi ESCLUSIVAMENTE con un oggetto JSON valido,
-senza testo aggiuntivo, senza backtick, con questa struttura esatta:
-
-{
-  "categoria": "stringa breve che identifica il tipo di richiesta",
-  "confidenza": "alta" | "media" | "bassa",
-  "azione": "invia_automatico" | "salva_bozza",
-  "oggetto_risposta": "oggetto della mail di risposta",
-  "testo_risposta": "corpo completo della mail di risposta"
-}
-
-Regola per 'azione':
-- confidenza "alta"  -> "invia_automatico"
-- confidenza "media" o "bassa" -> "salva_bozza"
-"""
+SYSTEM_INSTRUCTIONS = load_system_instructions()
 
 
 # ============================================================
@@ -248,11 +233,38 @@ def ask_gemini(mail_text):
     return resp.text or ""
 
 
-def get_ai_response(mail_text):
+def _is_busy_error(exc):
+    """True se l'errore indica un modello occupato/sovraccarico (da riprovare)."""
+    # google.genai espone il codice HTTP in .code; anthropic in .status_code
+    status = getattr(exc, "code", None) or getattr(exc, "status_code", None)
+    if status in (429, 503, 529):
+        return True
+    msg = str(exc).lower()
+    keywords = ("unavailable", "overloaded", "high demand", "rate limit",
+                "resource_exhausted", "quota", "try again", "503", "429", "529")
+    return any(k in msg for k in keywords)
+
+
+def _call_ai(mail_text):
     raw = ask_claude(mail_text) if PROVIDER == "claude" else ask_gemini(mail_text)
     # pulizia eventuali backtick
     cleaned = raw.strip().replace("```json", "").replace("```", "").strip()
     return json.loads(cleaned)
+
+
+def get_ai_response(mail_text):
+    for attempt in range(1, AI_MAX_RETRIES + 1):
+        try:
+            return _call_ai(mail_text)
+        except Exception as e:
+            if _is_busy_error(e) and attempt < AI_MAX_RETRIES:
+                log.warning(
+                    "Modello occupato (tentativo %d/%d): %s. Riprovo tra %d secondi.",
+                    attempt, AI_MAX_RETRIES, e, AI_RETRY_WAIT_SECONDS,
+                )
+                time.sleep(AI_RETRY_WAIT_SECONDS)
+                continue
+            raise
 
 
 # ============================================================
