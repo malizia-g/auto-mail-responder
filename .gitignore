@@ -1,0 +1,8 @@
+# Secreti locali OAuth Gmail
+credentials.json
+token.json
+.env.local.sh
+
+# Cache Python
+__pycache__/
+*.pyc

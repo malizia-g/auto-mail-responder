@@ -26,12 +26,14 @@ from googleapiclient.discovery import build
 # CONFIG - modifica qui o usa variabili d'ambiente
 # ============================================================
 LABEL_NAME = os.environ.get("GMAIL_LABEL", "DaRispondere")  # etichetta da monitorare
-PROVIDER = os.environ.get("AI_PROVIDER", "claude")  # "claude" oppure "gemini"
+PROVIDER = os.environ.get("AI_PROVIDER", "gemini")  # "claude" oppure "gemini"
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 CLAUDE_MODEL = os.environ.get("CLAUDE_MODEL", "claude-sonnet-4-6")
-GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash-lite")
 PROCESSED_LABEL = os.environ.get("PROCESSED_LABEL", "Elaborata")  # etichetta dopo elaborazione
+AI_REPLIED_LABEL = os.environ.get("AI_REPLIED_LABEL", "Risposta da AI")
+LEVEL2_REVIEW_LABEL = os.environ.get("LEVEL2_REVIEW_LABEL", "Da controllare a livello 2")
 DRY_RUN = os.environ.get("DRY_RUN", "false").lower() == "true"  # se true, non invia nulla
 
 SCOPES = [
@@ -208,11 +210,11 @@ def save_draft(service, msg_body):
     ).execute()
 
 
-def mark_processed(service, msg_id, source_label_id, processed_label_id):
+def mark_processed(service, msg_id, source_label_id, add_label_ids):
     service.users().messages().modify(
         userId="me", id=msg_id,
         body={"removeLabelIds": [source_label_id],
-              "addLabelIds": [processed_label_id]},
+              "addLabelIds": add_label_ids},
     ).execute()
 
 
@@ -232,13 +234,18 @@ def ask_claude(mail_text):
 
 
 def ask_gemini(mail_text):
-    import google.generativeai as genai
-    genai.configure(api_key=GEMINI_API_KEY)
-    model = genai.GenerativeModel(
-        GEMINI_MODEL, system_instruction=SYSTEM_INSTRUCTIONS
+    from google import genai
+    from google.genai import types
+
+    client = genai.Client(api_key=GEMINI_API_KEY)
+    resp = client.models.generate_content(
+        model=GEMINI_MODEL,
+        contents=mail_text,
+        config=types.GenerateContentConfig(
+            system_instruction=SYSTEM_INSTRUCTIONS,
+        ),
     )
-    resp = model.generate_content(mail_text)
-    return resp.text
+    return resp.text or ""
 
 
 def get_ai_response(mail_text):
@@ -261,6 +268,8 @@ def main():
         log.error("Etichetta '%s' non trovata. Creala in Gmail.", LABEL_NAME)
         return
     processed_label_id = ensure_label(service, PROCESSED_LABEL)
+    ai_replied_label_id = ensure_label(service, AI_REPLIED_LABEL)
+    level2_review_label_id = ensure_label(service, LEVEL2_REVIEW_LABEL)
 
     messages = list_messages_with_label(service, source_label_id)
     log.info("Trovate %d mail da elaborare", len(messages))
@@ -294,16 +303,24 @@ def main():
             if DRY_RUN:
                 log.info("  [DRY_RUN] nessuna azione eseguita")
                 log.info("  Testo risposta:\n%s", reply_body)
+                if result.get("azione") == "invia_automatico":
+                    log.info("  [DRY_RUN] etichette che verrebbero aggiunte: %s, %s",
+                             PROCESSED_LABEL, AI_REPLIED_LABEL)
+                else:
+                    log.info("  [DRY_RUN] etichette che verrebbero aggiunte: %s, %s",
+                             PROCESSED_LABEL, LEVEL2_REVIEW_LABEL)
                 continue
 
             if result.get("azione") == "invia_automatico":
                 send_reply(service, msg_body)
                 log.info("  ✓ Risposta INVIATA automaticamente")
+                target_label_ids = [processed_label_id, ai_replied_label_id]
             else:
                 save_draft(service, msg_body)
                 log.info("  ✓ Bozza SALVATA per revisione")
+                target_label_ids = [processed_label_id, level2_review_label_id]
 
-            mark_processed(service, m["id"], source_label_id, processed_label_id)
+            mark_processed(service, m["id"], source_label_id, target_label_ids)
 
         except Exception as e:
             log.exception("Errore elaborando mail %s: %s", m["id"], e)
