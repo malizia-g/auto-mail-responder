@@ -36,6 +36,7 @@ jobs:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GEMINI_MODEL: ${{ vars.GEMINI_MODEL }}
+          BACKUP_GEMINI_MODEL: ${{ vars.BACKUP_GEMINI_MODEL }}
           CLAUDE_MODEL: ${{ vars.CLAUDE_MODEL }}
           GMAIL_LABEL: ${{ vars.GMAIL_LABEL }}
           PROCESSED_LABEL: ${{ vars.PROCESSED_LABEL }}

@@ -29,6 +29,9 @@ export GMAIL_LABEL=DaRispondere       # nome dell'etichetta da monitorare
 
 # Facoltative (hanno un default sensato)
 export GEMINI_MODEL=gemini-2.5-flash  # modello Gemini (default: gemini-2.5-flash-lite)
+export BACKUP_GEMINI_MODEL=gemini-2.5-flash-lite  # modello di riserva se il principale
+                                      # è sovraccarico o ha esaurito la quota giornaliera
+                                      # (free tier). Vuoto = nessun fallback.
 export CLAUDE_MODEL=claude-sonnet-4-6 # modello Claude
 export AI_MAX_RETRIES=3               # tentativi se il modello è occupato (503/429)
 export AI_RETRY_WAIT_SECONDS=300      # attesa fra i tentativi, in secondi (5 min)

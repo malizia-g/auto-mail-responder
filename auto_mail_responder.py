@@ -33,6 +33,9 @@ ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 CLAUDE_MODEL = os.environ.get("CLAUDE_MODEL", "claude-sonnet-4-6")
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash-lite")
+# Modello Gemini di riserva: usato se il modello principale è sovraccarico o ha
+# esaurito la quota giornaliera (free tier). Vuoto = nessun fallback.
+BACKUP_GEMINI_MODEL = os.environ.get("BACKUP_GEMINI_MODEL", "")
 PROCESSED_LABEL = os.environ.get("PROCESSED_LABEL", "Elaborata")  # etichetta dopo elaborazione
 AI_REPLIED_LABEL = os.environ.get("AI_REPLIED_LABEL", "Risposta da AI")
 LEVEL2_REVIEW_LABEL = os.environ.get("LEVEL2_REVIEW_LABEL", "Da controllare a livello 2")
@@ -218,13 +221,13 @@ def ask_claude(mail_text):
     return resp.content[0].text
 
 
-def ask_gemini(mail_text):
+def ask_gemini(mail_text, model=None):
     from google import genai
     from google.genai import types
 
     client = genai.Client(api_key=GEMINI_API_KEY)
     resp = client.models.generate_content(
-        model=GEMINI_MODEL,
+        model=model or GEMINI_MODEL,
         contents=mail_text,
         config=types.GenerateContentConfig(
             system_instruction=SYSTEM_INSTRUCTIONS,
@@ -245,8 +248,11 @@ def _is_busy_error(exc):
     return any(k in msg for k in keywords)
 
 
-def _call_ai(mail_text):
-    raw = ask_claude(mail_text) if PROVIDER == "claude" else ask_gemini(mail_text)
+def _call_ai(mail_text, gemini_model=None):
+    if PROVIDER == "claude":
+        raw = ask_claude(mail_text)
+    else:
+        raw = ask_gemini(mail_text, model=gemini_model)
     # pulizia eventuali backtick
     cleaned = raw.strip().replace("```json", "").replace("```", "").strip()
     return json.loads(cleaned)
@@ -257,7 +263,23 @@ def get_ai_response(mail_text):
         try:
             return _call_ai(mail_text)
         except Exception as e:
-            if _is_busy_error(e) and attempt < AI_MAX_RETRIES:
+            if not _is_busy_error(e):
+                raise
+            # Il modello principale è occupato o ha finito la quota:
+            # prima di aspettare, prova il modello di riserva (solo Gemini).
+            if (PROVIDER == "gemini" and BACKUP_GEMINI_MODEL
+                    and BACKUP_GEMINI_MODEL != GEMINI_MODEL):
+                log.warning(
+                    "Modello %s occupato/quota esaurita: provo il modello di riserva %s",
+                    GEMINI_MODEL, BACKUP_GEMINI_MODEL,
+                )
+                try:
+                    return _call_ai(mail_text, gemini_model=BACKUP_GEMINI_MODEL)
+                except Exception as e2:
+                    if not _is_busy_error(e2):
+                        raise
+                    e = e2
+            if attempt < AI_MAX_RETRIES:
                 log.warning(
                     "Modello occupato (tentativo %d/%d): %s. Riprovo tra %d secondi.",
                     attempt, AI_MAX_RETRIES, e, AI_RETRY_WAIT_SECONDS,
