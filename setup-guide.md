@@ -41,10 +41,10 @@ GMAIL_CREDENTIALS_JSON	incolla tutto il contenuto di credentials.json
 GMAIL_TOKEN_JSON	incolla tutto il contenuto di token.json
 ANTHROPIC_API_KEY	la tua API key Claude (se usi Claude)
 GEMINI_API_KEY	la tua API key Gemini (se usi Gemini)
-GEMINI_MODEL	nome del modello Gemini, es. gemini-2.5-flash (se usi Gemini)
 Variables (configurazione non sensibile)
 Nome	Valore esempio
 AI_PROVIDER	claude oppure gemini
+GEMINI_MODEL	nome del modello Gemini, es. gemini-2.5-flash (se usi Gemini)
 CLAUDE_MODEL	claude-sonnet-4-6 (solo se usi Claude)
 GMAIL_LABEL	DaRispondere
 PROCESSED_LABEL	Elaborata
