@@ -17,20 +17,21 @@ bash
 pip install -r requirements.txt
 export DRY_RUN=true
 export GMAIL_LABEL=DaRispondere
-python3 auto_mail_responder.py
+python3 src/auto_mail_responder.py
 Si apre il browser → autorizza → viene creato token.json.
 
 Passo 2 — Crea il repository (PRIVATO)
-Su GitHub: New repository → spunta Private → carica:
+Su GitHub: New repository → spunta Private → carica l'intera struttura:
 
-auto_mail_responder.py
+src/auto_mail_responder.py
 requirements.txt
 README.md
-regolamento.md ← le regole/FAQ (il "cervello")
-formato-risposta.md ← il formato JSON richiesto all'AI
+config/regolamento.md ← le regole/FAQ (il "cervello")
+config/formato-risposta.md ← il formato JSON richiesto all'AI
+config/contatti-notifiche.md ← destinatari delle notifiche "da controllare a livello 2"
 .github/workflows/daily.yml ← crea la cartella e mettici dentro daily.yml
 NON caricare credentials.json né token.json nel repo! Vanno solo nei secret.
-IMPORTANTE: carica anche regolamento.md e formato-risposta.md, altrimenti lo script si ferma con un errore.
+IMPORTANTE: carica anche la cartella config/ (regolamento, formato-risposta, contatti-notifiche), altrimenti lo script si ferma con un errore.
 
 Passo 3 — Configura Secrets e Variables
 Nel repo: Settings → Secrets and variables → Actions

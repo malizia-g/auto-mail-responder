@@ -12,6 +12,7 @@ Configurazione tramite variabili d'ambiente - vedi sezione CONFIG.
 """
 
 import os
+import re
 import json
 import time
 import base64
@@ -39,6 +40,10 @@ BACKUP_GEMINI_MODEL = os.environ.get("BACKUP_GEMINI_MODEL", "")
 PROCESSED_LABEL = os.environ.get("PROCESSED_LABEL", "Elaborata")  # etichetta dopo elaborazione
 AI_REPLIED_LABEL = os.environ.get("AI_REPLIED_LABEL", "Risposta da AI")
 LEVEL2_REVIEW_LABEL = os.environ.get("LEVEL2_REVIEW_LABEL", "Da controllare a livello 2")
+# Etichetta aggiunta dopo aver notificato ai contatti una mail "da controllare a
+# livello 2": serve a NON segnalare in continuazione la stessa mail. L'etichetta
+# LEVEL2_REVIEW_LABEL invece resta finché non viene tolta a mano.
+NOTIFIED_LABEL = os.environ.get("NOTIFIED_LABEL", "Segnalata")
 DRY_RUN = os.environ.get("DRY_RUN", "false").lower() == "true"  # se true, non invia nulla
 
 # Retry quando il modello è occupato/sovraccarico (es. 503 UNAVAILABLE, 429 quota).
@@ -52,11 +57,23 @@ def _env_int(name, default):
 AI_MAX_RETRIES = _env_int("AI_MAX_RETRIES", 3)  # tentativi totali
 AI_RETRY_WAIT_SECONDS = _env_int("AI_RETRY_WAIT_SECONDS", 300)  # attesa fra i tentativi (5 min)
 
+# Struttura del progetto: il codice sta in src/, i file di configurazione in config/.
+# ROOT_DIR è la cartella radice del repo (dove stanno anche credentials.json/token.json).
+BASE_DIR = Path(__file__).resolve().parent          # .../src
+ROOT_DIR = BASE_DIR.parent                            # radice del repo
+CONFIG_DIR = ROOT_DIR / "config"
+
 # File markdown con le regole (il "cervello") e il formato di risposta richiesto.
 # Modifica quei file per cambiare il comportamento dell'AI, senza toccare il codice.
-BASE_DIR = Path(__file__).resolve().parent
-REGOLAMENTO_FILE = os.environ.get("REGOLAMENTO_FILE", str(BASE_DIR / "regolamento.md"))
-FORMATO_FILE = os.environ.get("FORMATO_FILE", str(BASE_DIR / "formato-risposta.md"))
+REGOLAMENTO_FILE = os.environ.get("REGOLAMENTO_FILE", str(CONFIG_DIR / "regolamento.md"))
+FORMATO_FILE = os.environ.get("FORMATO_FILE", str(CONFIG_DIR / "formato-risposta.md"))
+# Elenco dei contatti a cui inviare le notifiche "da controllare a livello 2".
+CONTACTS_FILE = os.environ.get("CONTACTS_FILE", str(CONFIG_DIR / "contatti-notifiche.md"))
+
+# File OAuth Gmail: stanno nella radice del repo (su GitHub Actions vengono
+# ricostruiti lì dai secret). Sovrascrivibili via variabili d'ambiente.
+CREDENTIALS_FILE = os.environ.get("GMAIL_CREDENTIALS_FILE", str(ROOT_DIR / "credentials.json"))
+TOKEN_FILE = os.environ.get("GMAIL_TOKEN_FILE", str(ROOT_DIR / "token.json"))
 
 SCOPES = [
     "https://www.googleapis.com/auth/gmail.modify",
@@ -91,20 +108,45 @@ def load_system_instructions():
 SYSTEM_INSTRUCTIONS = load_system_instructions()
 
 
+_EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
+
+
+def load_contacts():
+    """Legge gli indirizzi dei contatti di notifica dal file markdown.
+
+    Estrae ogni email presente nel file (una per riga nel formato lista),
+    ignorando commenti e testo libero. Restituisce una lista senza duplicati,
+    nell'ordine di apparizione. Se il file manca o non contiene indirizzi,
+    restituisce una lista vuota (la notifica verrà semplicemente saltata).
+    """
+    try:
+        text = Path(CONTACTS_FILE).read_text(encoding="utf-8")
+    except OSError as e:
+        log.warning("Impossibile leggere il file contatti '%s': %s", CONTACTS_FILE, e)
+        return []
+    seen, contacts = set(), []
+    for addr in _EMAIL_RE.findall(text):
+        low = addr.lower()
+        if low not in seen:
+            seen.add(low)
+            contacts.append(addr)
+    return contacts
+
+
 # ============================================================
 # AUTENTICAZIONE GMAIL
 # ============================================================
 def get_gmail_service():
     creds = None
-    if os.path.exists("token.json"):
-        creds = Credentials.from_authorized_user_file("token.json", SCOPES)
+    if os.path.exists(TOKEN_FILE):
+        creds = Credentials.from_authorized_user_file(TOKEN_FILE, SCOPES)
     if not creds or not creds.valid:
         if creds and creds.expired and creds.refresh_token:
             creds.refresh(Request())
         else:
-            flow = InstalledAppFlow.from_client_secrets_file("credentials.json", SCOPES)
+            flow = InstalledAppFlow.from_client_secrets_file(CREDENTIALS_FILE, SCOPES)
             creds = flow.run_local_server(port=0)
-        with open("token.json", "w") as token:
+        with open(TOKEN_FILE, "w") as token:
             token.write(creds.to_json())
     return build("gmail", "v1", credentials=creds)
 
@@ -213,6 +255,20 @@ def mark_processed(service, msg_id, source_label_id, add_label_ids):
     ).execute()
 
 
+def add_labels(service, msg_id, add_label_ids):
+    """Aggiunge etichette a una mail senza rimuoverne nessuna."""
+    service.users().messages().modify(
+        userId="me", id=msg_id, body={"addLabelIds": add_label_ids},
+    ).execute()
+
+
+def get_message_label_ids(service, msg_id):
+    msg = service.users().messages().get(
+        userId="me", id=msg_id, format="minimal"
+    ).execute()
+    return msg.get("labelIds", [])
+
+
 # ============================================================
 # AI PROVIDERS
 # ============================================================
@@ -297,13 +353,9 @@ def get_ai_response(mail_text):
 
 
 # ============================================================
-# MAIN
+# FASE 1 — RISPOSTE ALLE MAIL "DaRispondere"
 # ============================================================
-def main():
-    log.info("Avvio automazione risposte mail (provider=%s, dry_run=%s)",
-             PROVIDER, DRY_RUN)
-    service = get_gmail_service()
-
+def process_incoming(service):
     source_label_id = get_label_id(service, LABEL_NAME)
     if not source_label_id:
         log.error("Etichetta '%s' non trovata. Creala in Gmail.", LABEL_NAME)
@@ -366,6 +418,110 @@ def main():
         except Exception as e:
             log.exception("Errore elaborando mail %s: %s", m["id"], e)
 
+    log.info("Fase risposte completata.")
+
+
+# ============================================================
+# FASE 2 — NOTIFICA MAIL "DA CONTROLLARE A LIVELLO 2"
+# Manda ai contatti un riepilogo delle mail che richiedono un controllo umano.
+# Ogni mail notificata riceve l'etichetta "Segnalata" per non essere segnalata
+# di nuovo; l'etichetta "Da controllare a livello 2" resta finché non la togli
+# a mano.
+# ============================================================
+def build_digest_body(items):
+    righe = [
+        "Ci sono mail etichettate \"" + LEVEL2_REVIEW_LABEL + "\" che richiedono "
+        "un controllo manuale della Commissione Orario.",
+        "",
+        f"Numero di nuove mail da controllare: {len(items)}",
+        "",
+        "-" * 50,
+    ]
+    for i, it in enumerate(items, 1):
+        estratto = " ".join(it["body"].split())[:300]
+        if len(it["body"]) > 300:
+            estratto += "…"
+        righe += [
+            f"{i}) Da:      {it['from']}",
+            f"   Oggetto: {it['subject']}",
+            f"   Estratto: {estratto}" if estratto else "   Estratto: (vuoto)",
+            "-" * 50,
+        ]
+    righe += [
+        "",
+        "Trovi queste mail in Gmail filtrando per l'etichetta "
+        f"\"{LEVEL2_REVIEW_LABEL}\".",
+        "Dopo averle gestite, rimuovi a mano l'etichetta "
+        f"\"{LEVEL2_REVIEW_LABEL}\".",
+        "",
+        "La Commissione Orario (notifica automatica)",
+    ]
+    return "\n".join(righe)
+
+
+def notify_level2(service):
+    level2_label_id = get_label_id(service, LEVEL2_REVIEW_LABEL)
+    if not level2_label_id:
+        log.info("Etichetta '%s' non presente: nessuna notifica da inviare.",
+                 LEVEL2_REVIEW_LABEL)
+        return
+    notified_label_id = ensure_label(service, NOTIFIED_LABEL)
+
+    contacts = load_contacts()
+    if not contacts:
+        log.warning("Nessun contatto valido in '%s': notifica saltata.", CONTACTS_FILE)
+        return
+
+    # Mail con l'etichetta "da controllare a livello 2" ma NON ancora "Segnalata".
+    to_notify = []
+    for m in list_messages_with_label(service, level2_label_id):
+        if notified_label_id in get_message_label_ids(service, m["id"]):
+            continue
+        to_notify.append(m)
+
+    if not to_notify:
+        log.info("Nessuna nuova mail da controllare a livello 2 da segnalare.")
+        return
+
+    log.info("Trovate %d nuove mail da segnalare a %d contatti.",
+             len(to_notify), len(contacts))
+
+    items = []
+    for m in to_notify:
+        d = get_message_detail(service, m["id"])
+        items.append(d)
+
+    subject = f"[Commissione Orario] {len(items)} mail da controllare a livello 2"
+    body = build_digest_body(items)
+
+    if DRY_RUN:
+        log.info("  [DRY_RUN] notifica NON inviata. Destinatari: %s", ", ".join(contacts))
+        log.info("  [DRY_RUN] Oggetto: %s", subject)
+        log.info("  [DRY_RUN] Corpo:\n%s", body)
+        return
+
+    msg_body = create_mime_message(
+        to_addr=", ".join(contacts), subject=subject, body_text=body,
+    )
+    send_reply(service, msg_body)
+    log.info("  ✓ Notifica inviata a: %s", ", ".join(contacts))
+
+    # Segna come "Segnalata" le mail incluse nel digest (senza toccare le altre
+    # etichette, così "Da controllare a livello 2" resta).
+    for m in to_notify:
+        add_labels(service, m["id"], [notified_label_id])
+    log.info("  ✓ %d mail etichettate come '%s'.", len(to_notify), NOTIFIED_LABEL)
+
+
+# ============================================================
+# MAIN
+# ============================================================
+def main():
+    log.info("Avvio automazione risposte mail (provider=%s, dry_run=%s)",
+             PROVIDER, DRY_RUN)
+    service = get_gmail_service()
+    process_incoming(service)
+    notify_level2(service)
     log.info("Elaborazione completata.")
 
 

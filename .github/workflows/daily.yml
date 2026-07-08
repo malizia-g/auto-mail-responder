@@ -43,7 +43,7 @@ jobs:
           DRY_RUN: ${{ vars.DRY_RUN }}
           AI_MAX_RETRIES: ${{ vars.AI_MAX_RETRIES }}
           AI_RETRY_WAIT_SECONDS: ${{ vars.AI_RETRY_WAIT_SECONDS }}
-        run: python auto_mail_responder.py
+        run: python src/auto_mail_responder.py
 
       - name: Salva il token aggiornato (se rinnovato)
         run: |
