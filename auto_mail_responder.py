@@ -42,8 +42,15 @@ LEVEL2_REVIEW_LABEL = os.environ.get("LEVEL2_REVIEW_LABEL", "Da controllare a li
 DRY_RUN = os.environ.get("DRY_RUN", "false").lower() == "true"  # se true, non invia nulla
 
 # Retry quando il modello è occupato/sovraccarico (es. 503 UNAVAILABLE, 429 quota).
-AI_MAX_RETRIES = int(os.environ.get("AI_MAX_RETRIES", "3"))  # tentativi totali
-AI_RETRY_WAIT_SECONDS = int(os.environ.get("AI_RETRY_WAIT_SECONDS", "300"))  # attesa fra i tentativi (5 min)
+def _env_int(name, default):
+    # Usa il default anche quando la variabile esiste ma è vuota (es. su GitHub
+    # Actions una variable non valorizzata arriva come stringa vuota "").
+    val = os.environ.get(name, "").strip()
+    return int(val) if val else default
+
+
+AI_MAX_RETRIES = _env_int("AI_MAX_RETRIES", 3)  # tentativi totali
+AI_RETRY_WAIT_SECONDS = _env_int("AI_RETRY_WAIT_SECONDS", 300)  # attesa fra i tentativi (5 min)
 
 # File markdown con le regole (il "cervello") e il formato di risposta richiesto.
 # Modifica quei file per cambiare il comportamento dell'AI, senza toccare il codice.
